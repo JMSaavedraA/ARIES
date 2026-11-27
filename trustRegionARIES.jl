@@ -54,6 +54,13 @@ function safeCosine(a::AbstractVector, b::AbstractVector)
     return clamp(real(value), -1.0, 1.0)
 end
 
+function safeUnitCoefficient(value)
+    if !isfinite(value)
+        return 0.5
+    end
+    return clamp(abs(real(value)), 0.0, 1.0)
+end
+
 function safeCauchyPoint(g::AbstractVector, B::AbstractMatrix)
     Ng2 = dot(g, g)
     curvature = dot(g, B * g)
@@ -677,8 +684,8 @@ function trustRegionARIESBFGSAdaptive1(pb::PB, pbm::PBM, f::Function, maxIter::I
         end
         @inbounds pU .= safeCauchyPoint(g, B)
         @inbounds pN .= - (B \ g)
-        α = abs(safeCosine(d, pU))
-        β = abs(safeCosine(d, pN))
+        α = safeUnitCoefficient(safeCosine(d, pU))
+        β = safeUnitCoefficient(safeCosine(d, pN))
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -821,8 +828,8 @@ function trustRegionARIESBFGSAdaptive2(pb::PB, pbm::PBM, f::Function, maxIter::I
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = abs(dot(pN, pU))/(norm(pN)*norm(pU));
-        β = 1 - α;
+        α = safeUnitCoefficient(safeCosine(pN, pU))
+        β = 1 - α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -967,8 +974,8 @@ function trustRegionARIESBFGSAdaptive3(pb::PB, pbm::PBM, f::Function, maxIter::I
         γ1 = - Ng^2 / (g⋅(B*g))
         γ2 = Ng^2 / (g⋅pN)
         @inbounds pU .= γ1 * g
-        α = max(min(γ1 * γ2, 1.0), 0.0)
-        β = 1 - α;
+        α = safeUnitCoefficient(γ1 * γ2)
+        β = 1 - α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1111,8 +1118,8 @@ function trustRegionARIESBFGSAdaptive4(pb::PB, pbm::PBM, f::Function, maxIter::I
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = dot(B * g, g)/(norm(B * g)*Ng);
-        β = 1 - α;
+        α = safeUnitCoefficient(safeCosine(B * g, g))
+        β = 1 - α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1255,8 +1262,8 @@ function trustRegionARIESBFGSAdaptive5(pb::PB, pbm::PBM, f::Function, maxIter::I
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = abs(dot(pN, pU))/(norm(pN)*norm(pU));
-        β = α;
+        α = safeUnitCoefficient(safeCosine(pN, pU))
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1401,8 +1408,8 @@ function trustRegionARIESBFGSAdaptive6(pb::PB, pbm::PBM, f::Function, maxIter::I
         γ1 = - Ng^2 / (g⋅(B*g))
         γ2 = Ng^2 / (g⋅pN)
         @inbounds pU .= γ1 * g
-        α = max(min(γ1 * γ2, 1.0), 0.0)
-        β = α;
+        α = safeUnitCoefficient(γ1 * γ2)
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1545,8 +1552,8 @@ function trustRegionARIESBFGSAdaptive7(pb::PB, pbm::PBM, f::Function, maxIter::I
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = dot(B * g, g)/(norm(B * g)*Ng);
-        β = α;
+        α = safeUnitCoefficient(safeCosine(B * g, g))
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1689,8 +1696,8 @@ function trustRegionARIESBFGSAdaptive8(pb::PB, pbm::PBM, f::Function, maxIter::I
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = 1 - abs(dot(pN, pU))/(norm(pN)*norm(pU));
-        β = 1 - α;
+        α = safeUnitCoefficient(1 - abs(safeCosine(pN, pU)))
+        β = 1 - α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1835,8 +1842,8 @@ function trustRegionARIESBFGSAdaptive9(pb::PB, pbm::PBM, f::Function, maxIter::I
         γ1 = - Ng^2 / (g⋅(B*g))
         γ2 = Ng^2 / (g⋅pN)
         @inbounds pU .= γ1 * g
-        α = max(min(1 - γ1 * γ2, 1.0), 0.0)
-        β = α;
+        α = safeUnitCoefficient(1 - γ1 * γ2)
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -1979,8 +1986,8 @@ function trustRegionARIESBFGSAdaptive10(pb::PB, pbm::PBM, f::Function, maxIter::
         end
         @inbounds pU .= safeCauchyPoint(g, B)
         @inbounds pN .= - (B \ g)
-        β = safeCosine(B * g, g)
-        α = 1 - β;
+        β = safeUnitCoefficient(safeCosine(B * g, g))
+        α = 1 - β
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -2123,8 +2130,8 @@ function trustRegionARIESBFGSAdaptive11(pb::PB, pbm::PBM, f::Function, maxIter::
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = 1 - abs(dot(pN, pU))/(norm(pN)*norm(pU));
-        β = α;
+        α = safeUnitCoefficient(1 - abs(safeCosine(pN, pU)))
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -2269,8 +2276,8 @@ function trustRegionARIESBFGSAdaptive12(pb::PB, pbm::PBM, f::Function, maxIter::
         γ1 = - Ng^2 / (g⋅(B*g))
         γ2 = Ng^2 / (g⋅pN)
         @inbounds pU .= γ1 * g
-        α = max(min(1 - γ1 * γ2, 1.0), 0.0)
-        β = α;
+        α = safeUnitCoefficient(1 - γ1 * γ2)
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -2413,8 +2420,8 @@ function trustRegionARIESBFGSAdaptive13(pb::PB, pbm::PBM, f::Function, maxIter::
         end
         @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
         @inbounds pN .= - (B \ g)
-        α = 1 - dot(B * g, g)/(norm(B * g)*Ng);
-        β = α;
+        α = safeUnitCoefficient(1 - safeCosine(B * g, g))
+        β = α
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
