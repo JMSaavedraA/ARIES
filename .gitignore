@@ -4,5 +4,3 @@
 *.eps
 *.pdf
 *.xlsx
-julia_problems/*
-s2mpjlib.jl

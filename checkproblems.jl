@@ -411,17 +411,17 @@ function loadproblem(name::String)
     # Load the problem from the file
     filename = "julia_problems/$name.jl";
     include(filename);
-    
+
     # Get the function object by name from Main
     probfunc = getfield(Main, Symbol(name));
-    
+
     # Call the setup using invokelatest
     pb, pbm = Base.invokelatest(probfunc, "setup");
     x0 = pb.x0;
-    
+
     # Call the "cx" case using invokelatest
     cx = Base.invokelatest(probfunc, "cx", pbm, x0);
-    
+
     if cx === Nothing
         return name
     end

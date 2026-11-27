@@ -1,7 +1,7 @@
 using CSV, DataFrames, Plots
 include("processingFunctions.jl")
 
-test_name = "nesterovHessianBFGS_clean"
+test_name = length(ARGS) >= 1 ? String(ARGS[1]) : "ARIESadaptivevsFixedBFGS"
 
 
 function loadResults(test_name, testname)
@@ -12,3 +12,7 @@ function loadResults(test_name, testname)
 end
 
 df, results, functionsToTest = loadResults(test_name, test_name)
+
+algos_names = ["Dogleg", "ARIES α = 1/4, β = 1/2", "Adaptive ARIES"]
+
+plot_and_save_profile(results, algos_names, "Figures_"*test_name)

@@ -96,12 +96,13 @@ function plot_and_save_profile(data::AbstractMatrix, algo_names::Vector{String},
             ylabel = "ρ(τ)",
             legend = :bottomright,
             grid = :both,
-            size = (700, 500),
+            size = (600, 400),
             dpi = 1200,
-            titlefont = font(16, "Computer Modern"),
+            titlefont = font(14, "Computer Modern"),
             guidefont = font(12, "Computer Modern"),
-            tickfont = font(10, "Computer Modern"),
-            legendfont = font(10, "Computer Modern")
+            tickfont = font(12, "Computer Modern"),
+            legendfont = font(12, "Computer Modern"),
+            linewidth = 2
             )
 
         # Ensure directory exists
@@ -115,24 +116,31 @@ function plot_and_save_profile(data::AbstractMatrix, algo_names::Vector{String},
 end
 
 function compareMethods(functions::Vector{String},algos::Vector{String})
-    # Atomic variables for thread safety
     n = length(functions);
     m = length(algos);
-    # Preallocate results matrix: rows = functions, columns = [gD, kD, tD, gN, kN, tN, gP, kP, tP, gDD, kDD, tDD, gQ, kQ, tQ, gM, kM, tM]
     results = zeros(Float64, n, 3*m);
 
     @threads for i in 1:n
         name = functions[i];
         pb, pbm, probfunc = initProblem(name);
         for j in 1:m
+            aux_algo_name = algos[j];
+            aux_algo = getfield(Main, Symbol(aux_algo_name));
+            try
+                aux_algo(pb, pbm, probfunc, 2);
+            catch e
+                @error "$aux_algo_name failed initialization for $name" exception=(e, catch_backtrace())
+            end
+        end
+        for j in 1:m
             # Initialize all outputs as NaN
             g = k = t_local = NaN;
             algo_name = algos[j];
             algo = getfield(Main, Symbol(algo_name));
             try
-                t_local = @elapsed _, g, k, _, _, _, _ = algo(pb, pbm, probfunc);
+                t_local = @elapsed _, g, k, _, _, _, _ = algo(pb, pbm, probfunc, 100000);
             catch e
-                @info "$algo_name failed for $name: $e"
+                @error "$algo_name failed for $name" exception=(e, catch_backtrace())
                 g = k = t_local = NaN;
             end
             results[i, 3 * j - 2 : 3 * j] = [g, k, t_local];
@@ -143,7 +151,6 @@ function compareMethods(functions::Vector{String},algos::Vector{String})
 end
 
 function compareMethodsOneFunc(functionName::String,algos::Vector{String})
-    # Atomic variables for thread safety
     m = length(algos);
     pb, pbm, probfunc = initProblem(functionName);
     allGrads = zeros(Float64, 100000, m);
@@ -160,15 +167,21 @@ function compareMethodsOneFunc(functionName::String,algos::Vector{String})
         algo_name = algos[j];
         algo = getfield(Main, Symbol(algo_name));
         try
-            t = @elapsed _, _, k, _, G, F, acc = algo(pb, pbm, probfunc);
+            algo(pb, pbm, probfunc, 2);
+            t = @elapsed _, _, k, _, G, F, acc = algo(pb, pbm, probfunc,100000);
         catch e
-            @info "$algo_name failed for $functionName: $e"
+            @error "$algo_name failed for $functionName" exception=(e, catch_backtrace())
             g = k = t = acc = NaN;
             G[1:100000] = NaN;
             F[1:100000] = NaN;
         end
-        allGrads[1:k, j] = G;
-        allFVals[1:k, j] = F;
+        if k > 0
+            allGrads[1:k, j] .= G[1:k];
+            allFVals[1:k, j] .= F[1:k];
+        else
+            allGrads[:, j] .= NaN;
+            allFVals[:, j] .= NaN;
+        end
         allAcc[j] = acc;
         allTimes[j] = t;
         allIters[j] = k;

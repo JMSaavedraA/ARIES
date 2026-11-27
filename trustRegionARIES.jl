@@ -6,27 +6,11 @@ using LinearAlgebra
 include("s2mpjlib.jl")
 
 """
-trustRegionMomentum.jl
+ARIES trust-region implementations used in
+"Aries: A Three-Segment Path for Solving Trust-Region Subproblems".
 
-High-level implementations of trust-region algorithms used in the paper
-"A Momentum Trust-Region Algorithm for Unconstrained Optimization".
-
-Provides:
-- `trustRegionDoglegBFGS`  : Dogleg trust-region with BFGS updates
-- `trustRegionDoglegHessian`: Dogleg trust-region using exact Hessian
-- `trustRegionMomentumDoglegBFGS`: Momentum (Nesterov) + Dogleg + BFGS
-- `trustRegionMomentumDoglegHessian`: Momentum (Nesterov) + Dogleg + Hessian
-
-Typical internal defaults: `w1=1e-4`, `c0=0.1`, `c1=1/4`, `c2=1/2`, `η=2`,
-`λ=0.8`, `Δ0=1`, `ΔMin=0.01*sqrt(n)`, `ΔMax=10*sqrt(n)`, `tol=1e-4`.
-
-Example:
-```julia
-include("s2mpjlib.jl")
-include("trustRegionMomentum.jl")
-pb, pbm, prob = initProblem("ROSENBR")
-x, Ng, k, tol, G = trustRegionMomentumDoglegBFGS(pb, pbm, prob)
-```
+Provides the Dogleg reference method, fixed-parameter ARIES variants, and
+adaptive ARIES variants. Solving functions accept an optional iteration limit.
 """
 
 """
@@ -60,6 +44,29 @@ function updateΔ(Δ, ρ, c1, c2, η, ΔMin, ΔMax, d, c)
     return Δ
 end
 
+function safeCosine(a::AbstractVector, b::AbstractVector)
+    na = norm(a)
+    nb = norm(b)
+    if !isfinite(na) || !isfinite(nb) || na <= eps(Float64) || nb <= eps(Float64)
+        return 0.0
+    end
+    value = dot(a, b) / (na * nb)
+    return clamp(real(value), -1.0, 1.0)
+end
+
+function safeCauchyPoint(g::AbstractVector, B::AbstractMatrix)
+    Ng2 = dot(g, g)
+    curvature = dot(g, B * g)
+    if !isfinite(curvature) || curvature <= eps(Float64)
+        return -copy(g)
+    end
+    pU = -Ng2 / curvature * g
+    if !all(isfinite, pU)
+        return -copy(g)
+    end
+    return pU
+end
+
 """
 dogleg(Δ, g, B, pU, pN, d; tol=1e-6, dim=length(g))
 
@@ -84,7 +91,7 @@ Returns
 """
 function dogleg(Δ::Number,g::AbstractVector,B::AbstractMatrix, pU::AbstractVector, pN::AbstractVector, d::AbstractVector, w::AbstractVector)
     # Compute the scaled steepest-descent (Cauchy) point pU
-    @inbounds pU .= - (g⋅g) / (g⋅(B*g)) * g
+    @inbounds pU .= safeCauchyPoint(g, B)
     NpU = norm(pU)
     if NpU > Δ
         # Cauchy point lies outside the trust region -> scale to the boundary
@@ -113,7 +120,10 @@ end
 
 function ARIES(Δ::Number,g::AbstractVector,B::AbstractMatrix, pU::AbstractVector, pN::AbstractVector, d::AbstractVector, w::AbstractVector, v::AbstractVector, α::Number = 1/2, β::Number = 1/2)
     # Dogleg method for the trust region problem
-    @inbounds pU .= - (g⋅g) / (g⋅(B*g)) * g
+    if !isfinite(α) || !isfinite(β) || α < 0 || α > 1 || β < 0 || β > 1
+        throw(ArgumentError("ARIES parameters α and β must be finite values in [0, 1]"))
+    end
+    @inbounds pU .= safeCauchyPoint(g, B)
     @inbounds v .= α * pU
     NpU = norm(pU)
     Nv = α * NpU
@@ -134,7 +144,12 @@ function ARIES(Δ::Number,g::AbstractVector,B::AbstractMatrix, pU::AbstractVecto
             p1 = w⋅w
             p2 = w⋅v
             p3 = (Δ + Nv) * (Δ - Nv)
-            t = (-p2 + sqrt(p2^2 + p1*p3)) / p1
+            if p1 <= eps(Float64)
+                throw(SingularException(1))
+            end
+            discriminant = p2^2 + p1*p3
+            discriminant < 0 && (discriminant = 0.0)
+            t = (-p2 + sqrt(discriminant)) / p1
             @inbounds d .= v + t * w
             c = "D1"
         else
@@ -153,7 +168,9 @@ end
 
 function ARIES2(Δ::Number,g::AbstractVector,B::AbstractMatrix, pU::AbstractVector, pN::AbstractVector, d::AbstractVector, w::AbstractVector, v::AbstractVector, α::Number = 1/2, β::Number = 1/2)
     # Dogleg method for the trust region problem
-    
+    if !isfinite(α) || !isfinite(β) || α < 0 || α > 1 || β < 0 || β > 1
+        throw(ArgumentError("ARIES parameters α and β must be finite values in [0, 1]"))
+    end
     @inbounds v .= α * pU
     NpU = norm(pU)
     Nv = α * NpU
@@ -174,7 +191,10 @@ function ARIES2(Δ::Number,g::AbstractVector,B::AbstractMatrix, pU::AbstractVect
             p1 = w⋅w
             p2 = w⋅v
             p3 = (Δ + Nv) * (Δ - Nv)
-            t = (-p2 + sqrt(p2^2 + p1*p3)) / p1
+            p1 <= eps(Float64) && throw(SingularException(1))
+            discriminant = p2^2 + p1*p3
+            discriminant < 0 && (discriminant = 0.0)
+            t = (-p2 + sqrt(discriminant)) / p1
             @inbounds d .= v + t * w
             c = "D1"
         else
@@ -210,8 +230,7 @@ Returns
 - `G`  : history of gradient norms per iteration
 - `acc`: acceptance ratio (accepted steps / total iterations)
 """
-function trustRegionDoglegBFGS(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionDoglegBFGS(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -368,8 +387,7 @@ Returns
 - `G`  : history of gradient norms per iteration
 - `acc`: acceptance ratio (accepted steps / total iterations)
 """
-function trustRegionARIESBFGS(pb::PB, pbm::PBM, f::Function, α::Number=1/2, β::Number=1/2)
-    maxIter = 100000
+function trustRegionARIESBFGS(pb::PB, pbm::PBM, f::Function, α::Number=1/2, β::Number=1/2, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -507,40 +525,40 @@ function trustRegionARIESBFGS(pb::PB, pbm::PBM, f::Function, α::Number=1/2, β:
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGS11(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 1/4, 1/4)
+function trustRegionARIESBFGS11(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 1/4, 1/4, maxIter)
 end
 
-function trustRegionARIESBFGS12(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 1/4, 1/2)
+function trustRegionARIESBFGS12(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 1/4, 1/2, maxIter)
 end
 
-function trustRegionARIESBFGS13(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 1/4, 3/4)
+function trustRegionARIESBFGS13(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 1/4, 3/4, maxIter)
 end
 
-function trustRegionARIESBFGS21(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 1/2, 1/4)
+function trustRegionARIESBFGS21(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 1/2, 1/4, maxIter)
 end
 
-function trustRegionARIESBFGS22(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 1/2, 1/2)
+function trustRegionARIESBFGS22(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 1/2, 1/2, maxIter)
 end
 
-function trustRegionARIESBFGS23(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 1/2, 3/4)
+function trustRegionARIESBFGS23(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 1/2, 3/4, maxIter)
 end
 
-function trustRegionARIESBFGS31(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 3/4, 1/4)
+function trustRegionARIESBFGS31(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 3/4, 1/4, maxIter)
 end
 
-function trustRegionARIESBFGS32(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 3/4, 1/2)
+function trustRegionARIESBFGS32(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 3/4, 1/2, maxIter)
 end
 
-function trustRegionARIESBFGS33(pb::PB, pbm::PBM, f::Function)
-    return trustRegionARIESBFGS(pb, pbm, f, 3/4, 3/4)
+function trustRegionARIESBFGS33(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
+    return trustRegionARIESBFGS(pb, pbm, f, 3/4, 3/4, maxIter)
 end
 
 
@@ -567,8 +585,7 @@ Returns
 - `acc`: acceptance ratio (accepted steps / total iterations)
 """
 
-function trustRegionARIESBFGSAdaptive1(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive1(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -658,10 +675,10 @@ function trustRegionARIESBFGSAdaptive1(pb::PB, pbm::PBM, f::Function)
         catch
             B = Matrix{Float64}(I, n, n)
         end
-        @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
+        @inbounds pU .= safeCauchyPoint(g, B)
         @inbounds pN .= - (B \ g)
-        α = abs(dot(d, pU)) / (norm(d) * norm(pU))
-        β = abs(dot(d, pN)) / (norm(d) * norm(pN))
+        α = abs(safeCosine(d, pU))
+        β = abs(safeCosine(d, pN))
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
         try
@@ -712,8 +729,7 @@ function trustRegionARIESBFGSAdaptive1(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive2(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive2(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -857,8 +873,7 @@ function trustRegionARIESBFGSAdaptive2(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive3(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive3(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1004,8 +1019,7 @@ function trustRegionARIESBFGSAdaptive3(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive4(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive4(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1149,8 +1163,7 @@ function trustRegionARIESBFGSAdaptive4(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive5(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive5(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1294,8 +1307,7 @@ function trustRegionARIESBFGSAdaptive5(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive6(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive6(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1441,8 +1453,7 @@ function trustRegionARIESBFGSAdaptive6(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive7(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive7(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1586,8 +1597,7 @@ function trustRegionARIESBFGSAdaptive7(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive8(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive8(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1731,8 +1741,7 @@ function trustRegionARIESBFGSAdaptive8(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive9(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive9(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1878,8 +1887,7 @@ function trustRegionARIESBFGSAdaptive9(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive10(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive10(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -1969,9 +1977,9 @@ function trustRegionARIESBFGSAdaptive10(pb::PB, pbm::PBM, f::Function)
         catch
             B = Matrix{Float64}(I, n, n)
         end
-        @inbounds pU .= - Ng^2 / (g⋅(B*g)) * g
+        @inbounds pU .= safeCauchyPoint(g, B)
         @inbounds pN .= - (B \ g)
-        β = dot(B * g, g)/(norm(B * g)*Ng);
+        β = safeCosine(B * g, g)
         α = 1 - β;
         c = ARIES2(Δ, g, B, pU, pN, d, w, v, α, β)
         @. xs = x + d
@@ -2023,8 +2031,7 @@ function trustRegionARIESBFGSAdaptive10(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive11(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive11(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -2168,8 +2175,7 @@ function trustRegionARIESBFGSAdaptive11(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive12(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive12(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -2315,8 +2321,7 @@ function trustRegionARIESBFGSAdaptive12(pb::PB, pbm::PBM, f::Function)
     return x, Ng, k, tol, G, F, acc
 end
 
-function trustRegionARIESBFGSAdaptive13(pb::PB, pbm::PBM, f::Function)
-    maxIter = 100000
+function trustRegionARIESBFGSAdaptive13(pb::PB, pbm::PBM, f::Function, maxIter::Int = 100000)
     G = zeros(Float64, maxIter)
     F = copy(G)
     x = copy(pb.x0)
@@ -2458,4 +2463,253 @@ function trustRegionARIESBFGSAdaptive13(pb::PB, pbm::PBM, f::Function)
     F = F[1:k]  # Truncate the function value history
     acc = acc / k  # Compute acceptance ratio
     return x, Ng, k, tol, G, F, acc
+end
+
+## Auxiliary functions for evaluating the objective and gradient of a S2MPJ problem updating in-place the gradient vector `gx` and optionally the Hessian `Hx` if provided. It's not included in the S2MPJ library but is heavily based on the `evalgrsum` function from S2MPJ, modified to support in-place updates for efficiency in the trust-region methods, as it avoids unnecessary allocations.
+
+function evalgrsum!(x::Vector{Float64}, pbm::PBM, gx::Vector{Float64})
+    glist = pbm.objgrps
+
+    n = length(x)
+    fx = 0
+
+    # Gradient initialization
+    if !isempty(pbm.objderlvl)
+        if pbm.objderlvl >= 1
+            gx .= spzeros(n, 1)
+        else
+            gx .= spzeros(n, 1)
+            gx[1] = NaN
+        end
+    else
+        gx .= spzeros(n, 1)
+    end
+
+    # Check if pbm.A is not empty
+    has_A = !isempty(pbm.A)
+    if has_A
+        sA1, sA2 = size(pbm.A)
+    end
+
+    # Evaluate the quadratic term, if any
+    if !isempty(pbm.H)
+        Htimesx = pbm.H * x
+        gx .+= Htimesx
+        fx += 0.5 * x' * Htimesx
+    end
+
+    for iig in 1:length(glist)
+        ig = glist[iig]
+
+        # Derivative level for the group
+        if !isempty(pbm.objderlvl)
+            derlvl = pbm.objderlvl
+        else
+            derlvl = 2
+        end
+        nout = min(2, derlvl + 1)
+
+        # Group scaling
+        gsc = 1.0
+        if isdefined(pbm, :gscale)
+            if ig <= length(pbm.gscale) && abs(pbm.gscale[ig]) > 1.0e-15
+                gsc = pbm.gscale[ig]
+            end
+        end
+
+        # Linear term
+
+        if isdefined(pbm, :gconst) && ig <= length(pbm.gconst)
+            fin = -pbm.gconst[ig]
+        else
+            fin = 0
+        end
+        gin = zeros(Float64, n)
+        if has_A && ig <= sA1
+            gin[1:sA2] = pbm.A[ig, 1:sA2]
+            fin += gin[1:sA2]' * x[1:sA2]
+        end
+
+        # Nonlinear group elements
+        if isdefined(pbm, :grelt) && ig <= length(pbm.grelt) && !isempty(pbm.grelt[ig])
+            for iiel in 1:length(pbm.grelt[ig])
+                iel = pbm.grelt[ig][iiel]
+                irange = pbm.elvar[iel]
+                efname = pbm.elftype[iel]
+                has_weights = isdefined( pbm, :grelw ) && ig <= length( pbm.grelw ) && !isempty( pbm.grelw[ig] )
+                if has_weights
+                    wiel        = pbm.grelw[ig][iiel]
+                end
+                if nout == 1
+                    fiel = pbm.call( efname, x[irange], iel, 1, pbm )
+                    fin += has_weights ? wiel * fiel : fiel
+                else
+                    fiel, giel = pbm.call( efname, x[irange], iel, 2, pbm )
+                    fin       += has_weights ? wiel * fiel : fiel
+                    for ir in 1:length(irange)
+                        ii       = irange[ir]
+                        gin[ii] += has_weights ? wiel * giel[ir] : giel[ir]
+                    end
+                end
+            end
+        end
+
+        # Group function (non-TRIVIAL)
+        if isdefined(pbm, :grftype) && ig <= length(pbm.grftype) &&
+           isassigned(pbm.grftype, ig) && pbm.grftype[ig] != "TRIVIAL" && pbm.grftype[ig] != ""
+            egname = pbm.grftype[ig]
+            fa, grada = pbm.call(egname, fin, ig, 2, pbm)
+            fx += fa / gsc
+            if derlvl >= 1
+                gx .+= grada[1] * gin / gsc
+            else
+                gx .= spzeros(n, 1)
+                gx[1] = NaN
+            end
+        else
+            # TRIVIAL case
+            fx += fin / gsc
+            if derlvl >= 1
+                gx .+= gin / gsc
+            else
+                gx .= spzeros(n, 1)
+                gx[1] = NaN
+            end
+        end
+    end
+
+    return fx
+end
+
+
+function evalgrsum!(x::Vector{Float64}, pbm::PBM, gx::Vector{Float64}, Hx::Matrix{Float64})
+    glist = pbm.objgrps
+    n = length(x)
+    fx = 0
+
+    # Initialize gx and Hx
+    if !isempty(pbm.objderlvl) && pbm.objderlvl >= 1
+        gx .= spzeros(n, 1)
+    else
+        gx .= spzeros(n, 1)
+        gx[1] = NaN
+    end
+    if !isempty(pbm.objderlvl) && pbm.objderlvl >= 2
+        Hx .= spzeros(n, n)
+    else
+        Hx .= spzeros(n, n)
+        Hx[1,1] = NaN
+    end
+
+    # Check if pbm.A is not empty
+    has_A = !isempty(pbm.A)
+    if has_A
+        sA1, sA2 = size(pbm.A)
+    end
+
+    # Evaluate the quadratic term, if any.
+    if !isempty(pbm.H)
+        Htimesx = pbm.H * x
+        gx .+= Htimesx
+        fx += 0.5 * x' * Htimesx
+        Hx .+= pbm.H
+    end
+
+    for ig in glist
+        # Derivative level
+        derlvl = !isempty(pbm.objderlvl) ? pbm.objderlvl : 2
+        nout = min(3, derlvl + 1)
+
+        # Group scaling
+        gsc = 1.0
+        if isdefined(pbm, :gscale)
+            if ig <= length(pbm.gscale) && abs(pbm.gscale[ig]) > 1.0e-15
+                gsc = pbm.gscale[ig]
+            end
+        end
+
+        # Linear term
+        fin = isdefined(pbm, :gconst) && ig <= length(pbm.gconst) ? -pbm.gconst[ig] : 0.0
+        gin = zeros(Float64, n)
+        if has_A && ig <= sA1
+            gin[1:sA2] = pbm.A[ig, 1:sA2]
+            fin += gin[1:sA2]' * x[1:sA2]
+        end
+
+        Hin = spzeros(n, n)
+
+        # Loop on the group's elements
+        if isdefined(pbm, :grelt) && ig <= length(pbm.grelt) && !isempty(pbm.grelt[ig])
+            for iiel in 1:length(pbm.grelt[ig])
+                iel = pbm.grelt[ig][iiel]
+                irange = pbm.elvar[iel]
+                efname = pbm.elftype[iel]
+                has_weights = isdefined(pbm, :grelw) && ig <= length(pbm.grelw) && !isempty(pbm.grelw[ig])
+                if has_weights
+                    wiel = pbm.grelw[ig][iiel]
+                end
+
+                if nout == 1
+                    fiel = pbm.call( efname, x[irange], iel, 1, pbm )
+                    fin += has_weights ? wiel * fiel : fiel
+                elseif nout == 2
+                    fiel, giel = pbm.call( efname, x[irange], iel, 2, pbm )
+                    fin       += has_weights ? wiel * fiel : fiel
+                    for ir in 1:length(irange)
+                        ii       = irange[ir]
+                        gin[ii] += has_weights ? wiel * giel[ir] : giel[ir]
+                    end
+                elseif nout == 3
+                    fiel, giel, Hiel = pbm.call( efname, x[irange], iel, 3, pbm )
+                    fin += has_weights ? wiel * fiel : fiel
+                    for ir in 1:length(irange)
+                        ii       = irange[ir]
+                        gin[ii] += has_weights ? wiel * giel[ir] : giel[ir]
+                        for jr in 1:length(irange)
+                           jj          = irange[jr]
+                           Hin[ii,jj] += has_weights ? wiel * Hiel[ir,jr] : Hiel[ir,jr]
+                        end
+                    end
+                end
+            end
+        end
+
+        # Non-TRIVIAL group function
+        if isdefined(pbm, :grftype) && ig <= length(pbm.grftype) &&
+           isassigned(pbm.grftype, ig) && pbm.grftype[ig] != "TRIVIAL" && pbm.grftype[ig] != ""
+            egname = pbm.grftype[ig]
+            fa, grada, Hessa = pbm.call(egname, fin, ig, 3, pbm)
+            fx += fa / gsc
+            if derlvl >= 1
+                gx .+= grada[1] * gin / gsc
+            else
+                gx .= spzeros(n, 1)
+                gx[1] = NaN
+            end
+            if derlvl >= 2
+                sgin = sparse(gin)
+                Hx .+= (Hessa[1] * sgin * sgin' + grada[1] * Hin) / gsc
+            else
+                Hx .= spzeros(n, n)
+                Hx[1,1] = NaN
+            end
+        else
+            # TRIVIAL case
+            fx += fin / gsc
+            if derlvl >= 1
+                gx .+= gin / gsc
+            else
+                gx .= spzeros(n, 1)
+                gx[1] = NaN
+            end
+            if derlvl >= 2
+                Hx .+= Hin / gsc
+            else
+                Hx .= spzeros(n, n)
+                Hx[1,1] = NaN
+            end
+        end
+    end
+
+    return fx
 end
